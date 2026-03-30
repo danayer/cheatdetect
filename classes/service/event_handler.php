@@ -70,10 +70,6 @@ class event_handler {
 
         $timestamp = (int)$eventdata->timestamp['unix'];
         self::dispatch_handler($eventdata, $context, $timestamp);
-
-        if ($eventdata->action === 'extensions_detected') {
-            self::save_extensions($eventdata, $context);
-        }
     }
 
     /**
@@ -336,17 +332,5 @@ class event_handler {
      */
     private static function to_seconds($jsTimestamp): int {
         return (int) ($jsTimestamp / self::TIMESTAMP_CONVERSION_FACTOR);
-    }
-
-    private static function save_extensions(\stdClass $eventdata, array $context): void {
-        global $DB;
-
-        $record = new \stdClass();
-        $record->attemptid   = $eventdata->attemptid ?? null;
-        $record->userid      = $eventdata->userid ?? null;
-        $record->extensions  = json_encode($eventdata->extensions ?? []);
-        $record->timecreated = time();
-
-        $DB->insert_record('quizaccess_cheatdetect_extensions', $record);
     }
 }
