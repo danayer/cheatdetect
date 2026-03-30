@@ -89,7 +89,7 @@ class save_data extends external_api {
         ?int $slot,
         array $events
     ): array {
-        global $DB;
+        global $DB, $USER;
 
         self::validate_parameters(self::execute_parameters(), [
             'session_id' => $session_id,
@@ -104,8 +104,10 @@ class save_data extends external_api {
         self::validate_context($context);
         require_login();
 
-        // Prevent students from writing arbitrary tracking data
-        require_capability('mod/cheatdetect:savedetectiondata', $context);
+        // Prevent students from writing tracking data for other users' attempts.
+        if ((int)$USER->id !== $userid) {
+            throw new \required_capability_exception($context, '', 'nopermissions', '');
+        }
 
         $transaction = $DB->start_delegated_transaction();
 
