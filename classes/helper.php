@@ -1,0 +1,225 @@
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+/**
+ * Cheat detection helper utilities.
+ *
+ * Provides high-level query methods to retrieve and aggregate
+ * cheat detection metrics and extension data for quiz attempts.
+ *
+ * @package    quizaccess_cheatdetect
+ * @copyright  2026 CBlue SRL
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ * @author     gnormand@cblue.be
+ * @author     abrichard@cblue.be
+ * @since      1.0.0
+ */
+namespace quizaccess_cheatdetect;
+
+defined('MOODLE_INTERNAL') || die();
+
+use quizaccess_cheatdetect\persistent\metric;
+use quizaccess_cheatdetect\persistent\extension;
+
+/**
+ * Helper class for querying cheat detection data.
+ *
+ * This class centralises database queries related to:
+ * - Slot metrics
+ * - Extension detection
+ * - Attempt-level statistics
+ *
+ * All methods are static and designed for read-only operations.
+ */
+class helper {
+
+    /**
+     * Retrieve metric data for a specific attempt and slot.
+     *
+     * @param int $attemptid Quiz attempt ID.
+     * @param int $slot Question slot number.
+     *
+     * @return metric|null Metric persistent object or null if not found.
+     */
+    public static function get_slot_metric(int $attemptid, int $slot): ?metric {
+        global $DB;
+
+        $sql = "SELECT m.*,
+                    q.questionsperpage
+                FROM {" . metric::TABLE . "} m
+                JOIN {quiz_attempts} qa ON qa.id = m.attemptid
+                JOIN {quiz} q ON q.id = qa.quiz
+                WHERE m.attemptid = :attemptid
+                AND m.slot = :slot";
+
+        $record = $DB->get_record_sql($sql, [
+            'attemptid' => $attemptid,
+            'slot' => $slot
+        ]);
+
+        if (!$record) {
+            return null;
+        }
+
+        return new metric(0, $record);
+    }
+
+    /**
+     * Get total time spent across all slots for a given attempt.
+     *
+     * @param int $attemptid Quiz attempt ID.
+     *
+     * @return int Total time in seconds.
+     */
+    public static function get_total_attempt_time(int $attemptid): int {
+        global $DB;
+
+        $sql = "SELECT SUM(time_total) as total_time
+                FROM {" . metric::TABLE . "}
+                WHERE attemptid = :attemptid
+                AND slot IS NOT NULL";
+
+        $result = $DB->get_record_sql($sql, ['attemptid' => $attemptid]);
+
+        return $result && $result->total_time ? (int)$result->total_time : 0;
+    }
+
+    /**
+     * Retrieve detected browser extensions for a specific attempt and slot.
+     *
+     * @param int $attemptid Quiz attempt ID.
+     * @param int $slot Question slot number.
+     *
+     * @return array<int, array{
+     *     key: string,
+     *     name: string,
+     *     uid: string,
+     *     detected_at: int
+     * }>
+     *     List of detected extensions with metadata.
+     */
+    public static function get_slot_extensions(int $attemptid, int $slot): array {
+        global $DB;
+
+        $records = $DB->get_records(extension::TABLE, [
+            'attemptid' => $attemptid,
+            'slot' => $slot
+        ]);
+
+        $extensions = [];
+        foreach ($records as $record) {
+            $extensions[] = [
+                'key' => $record->extension_key,
+                'name' => $record->extension_name,
+                'uid' => $record->extension_uid,
+                'detected_at' => $record->timecreated
+            ];
+        }
+
+        return $extensions;
+    }
+
+    /**
+     * Retrieve all metric objects for a given attempt.
+     *
+     * Returned array is indexed by slot number.
+     *
+     * @param int $attemptid Quiz attempt ID.
+     *
+     * @return array<int, metric> Array of metric persistents indexed by slot.
+     */
+    public static function get_attempt_metrics(int $attemptid): array {
+        global $DB;
+
+        $records = $DB->get_records(metric::TABLE, ['attemptid' => $attemptid]);
+
+        $metrics = [];
+        foreach ($records as $record) {
+            $metric = new metric(0, $record);
+            $slot = $metric->get('slot');
+            if ($slot !== null) {
+                $metrics[$slot] = $metric;
+            }
+        }
+
+        return $metrics;
+    }
+
+    /**
+     * Determine whether any extension was detected for an attempt.
+     *
+     * @param int $attemptid Quiz attempt ID.
+     *
+     * @return bool True if at least one extension record exists.
+     */
+    public static function has_extensions(int $attemptid): bool {
+        global $DB;
+
+        return $DB->record_exists(extension::TABLE, ['attemptid' => $attemptid]);
+    }
+
+    /**
+     * Compute summary statistics for a quiz attempt.
+     *
+     * Includes aggregated counts and derived indicators.
+     *
+     * @param int $attemptid Quiz attempt ID.
+     *
+     * @return array{
+     *     slot_count: int,
+     *     total_time: int,
+     *     total_copies: int,
+     *     total_focus_losses: int,
+     *     total_extensions: int,
+     *     has_only_one_question_per_page: bool,
+     *     cheat_detected: bool,
+     *     avg_time: int
+     * }
+     *     Structured summary of attempt metrics.
+     */
+    public static function get_attempt_summary(int $attemptid): array {
+        global $DB;
+
+        $sql = "SELECT
+                    COUNT(*) as slot_count,
+                    SUM(m.time_total) as total_time,
+                    SUM(m.copy_count) as total_copies,
+                    SUM(m.focus_loss_count) as total_focus_losses,
+                    SUM(m.extension_count) as total_extensions,
+                    q.questionsperpage
+                FROM {" . metric::TABLE . "} m
+                JOIN {quiz_attempts} qa ON qa.id = m.attemptid
+                JOIN {quiz} q ON q.id = qa.quiz
+                WHERE m.attemptid = :attemptid
+                AND m.slot IS NOT NULL";
+
+        $result = $DB->get_record_sql($sql, ['attemptid' => $attemptid]);
+
+        $summary = [
+            'slot_count' => $result ? (int)$result->slot_count : 0,
+            'total_time' => $result ? (int)$result->total_time : 0,
+            'total_copies' => $result ? (int)$result->total_copies : 0,
+            'total_focus_losses' => $result ? (int)$result->total_focus_losses : 0,
+            'total_extensions' => $result ? (int)$result->total_extensions : 0,
+            'has_only_one_question_per_page' => $result && (int)$result->questionsperpage === 1,
+        ];
+
+        $total_copies = $result ? (int)$result->total_copies : 0;
+        $total_focus_losses = $result ? (int)$result->total_focus_losses : 0;
+        $total_extensions = $result ? (int)$result->total_extensions : 0;
+        $summary['cheat_detected'] = ($total_copies + $total_focus_losses + $total_extensions) > 0;
+
+        if ($summary['slot_count'] > 0) {
+            $summary['avg_time'] = (int)($summary['total_time'] / $summary['slot_count']);
+        } else {
+            $summary['avg_time'] = 0;
+        }
+
+        return $summary;
+    }
+}
