@@ -47,6 +47,10 @@ define([
             let db = null;
             let isCurrentlyFocused = !document.hidden;
 
+            // In-memory buffer mirrors what is in IndexedDB.
+            // Lets us flush synchronously on page unload via sendBeacon.
+            let pendingEvents = [];
+
             let extensionCheckInterval = null;
             let extensionDetectedDataAlreadySent = new Set();
 
@@ -193,19 +197,22 @@ define([
              * @private
              */
             function logEvent(newEvent) {
+                const _newEvent = {
+                    timestamp: {
+                        unix: SharedUtils.generateTimestamp().unix
+                    },
+                    action: newEvent.action,
+                    data: newEvent.data !== undefined && newEvent.data !== null
+                        ? JSON.stringify(newEvent.data)
+                        : null
+                };
+
+                // Keep in-memory copy for synchronous sendBeacon on unload.
+                pendingEvents.push(_newEvent);
+
                 if (db) {
                     const transaction = db.transaction("events", "readwrite");
                     const objectStore = transaction.objectStore("events");
-
-                    const _newEvent = {
-                        timestamp: {
-                            unix: SharedUtils.generateTimestamp().unix
-                        },
-                        action: newEvent.action,
-                        data: newEvent.data !== undefined && newEvent.data !== null
-                            ? JSON.stringify(newEvent.data)
-                            : null
-                    };
 
                     if (DEBUG_SHOW_CONSOLE_LOG) {
                         // eslint-disable-next-line no-console
@@ -382,11 +389,29 @@ define([
 
                     const pageUnloadEvent = {
                         action: "page_unload",
-                        data: {}
+                        timestamp: {unix: SharedUtils.generateTimestamp().unix},
+                        data: null
                     };
-                    logEvent(pageUnloadEvent);
 
-                    flushEvents();
+                    // Add page_unload directly to the in-memory buffer so sendBeacon
+                    // includes it without needing to read IndexedDB asynchronously.
+                    pendingEvents.push(pageUnloadEvent);
+
+                    // sendBeacon is guaranteed to be delivered even when the page is
+                    // navigating away, unlike XHR which the browser cancels.
+                    if (!sendBeaconFlush(pendingEvents)) {
+                        // Fallback for browsers without sendBeacon support.
+                        logEvent({action: "page_unload", data: null});
+                        flushEvents();
+                    } else {
+                        pendingEvents = [];
+                        // Clear IndexedDB so that these events are not replayed when
+                        // the next quiz question page loads in the same browser session.
+                        if (db) {
+                            const tx = db.transaction("events", "readwrite");
+                            tx.objectStore("events").clear();
+                        }
+                    }
                 });
 
                 trackDocumentState({type: 'visibilitychange'});
@@ -493,9 +518,75 @@ define([
              * @private
              */
             function clearStoredEvents() {
+                pendingEvents = [];
                 const transaction = db.transaction("events", "readwrite");
                 const objectStore = transaction.objectStore("events");
                 objectStore.clear();
+            }
+
+            /**
+             * Serialise an event array to the Moodle web service argument shape.
+             * @function eventsToArgs
+             * @param {Array} events - Raw event objects from pendingEvents / IndexedDB
+             * @returns {Array} Array ready to be passed as the `events` AJAX arg
+             * @private
+             */
+            function eventsToArgs(events) {
+                return filterSpuriousEvents(events).map(function(event) {
+                    var tsUnix;
+                    if (event.timestamp && event.timestamp.unix !== undefined) {
+                        tsUnix = event.timestamp.unix;
+                    } else if (typeof event.timestamp === 'number') {
+                        tsUnix = event.timestamp;
+                    } else {
+                        // eslint-disable-next-line no-console
+                        console.warn('CheatDetect: unexpected timestamp format in event', event.action);
+                        tsUnix = Date.now();
+                    }
+                    return {
+                        action: event.action,
+                        timestamp: {unix: tsUnix},
+                        data: event.data !== undefined && event.data !== null
+                            ? (typeof event.data === 'string' ? event.data : JSON.stringify(event.data))
+                            : null
+                    };
+                });
+            }
+
+            /**
+             * Send pending events via navigator.sendBeacon for reliable page-unload delivery.
+             * sendBeacon is not cancelled by the browser when the page navigates away,
+             * unlike XHR / fetch. Returns true if the beacon was queued successfully.
+             * @function sendBeaconFlush
+             * @param {Array} events - Events to send (in pendingEvents format)
+             * @returns {boolean} true if sendBeacon was called and queued the request
+             * @private
+             */
+            function sendBeaconFlush(events) {
+                if (!navigator.sendBeacon || !events || events.length === 0) {
+                    return false;
+                }
+
+                var args = eventsToArgs(events);
+                if (args.length === 0) {
+                    return true; // nothing to send after filtering
+                }
+
+                var payload = JSON.stringify([{
+                    index: 0,
+                    methodname: 'quizaccess_cheatdetect_save_data',
+                    args: {
+                        session_id: backendParams.sessionId,
+                        attemptid: backendParams.attemptid,
+                        userid: backendParams.userid,
+                        quizid: backendParams.quizid,
+                        slot: backendParams.slot !== undefined ? backendParams.slot : null,
+                        events: args
+                    }
+                }]);
+
+                var beaconUrl = M.cfg.wwwroot + '/lib/ajax/service.php?sesskey=' + M.cfg.sesskey;
+                return navigator.sendBeacon(beaconUrl, new Blob([payload], {type: 'application/json'}));
             }
 
             initIndexedDB().then(() => {

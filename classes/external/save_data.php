@@ -32,9 +32,6 @@ use external_single_structure;
 use external_multiple_structure;
 use external_value;
 use dml_transaction_exception;
-use quizaccess_cheatdetect\persistent\event;
-use quizaccess_cheatdetect\persistent\metric;
-use quizaccess_cheatdetect\persistent\extension;
 use quizaccess_cheatdetect\service\event_handler;
 use stdClass;
 use coding_exception;
@@ -89,7 +86,7 @@ class save_data extends external_api {
         ?int $slot,
         array $events
     ): array {
-        global $DB;
+        global $DB, $USER;
 
         self::validate_parameters(self::execute_parameters(), [
             'session_id' => $session_id,
@@ -104,8 +101,16 @@ class save_data extends external_api {
         self::validate_context($context);
         require_login();
 
-        // Prevent students from writing arbitrary tracking data
-        require_capability('mod/cheatdetect:savedetectiondata', $context);
+        // Prevent students from writing tracking data for other users' attempts.
+        if ((int)$USER->id !== $userid) {
+            throw new \moodle_exception('accessdenied', 'admin');
+        }
+
+        // Verify the attempt record actually belongs to this user so that a
+        // student cannot submit events for another student's valid attempt ID.
+        if (!$DB->record_exists('quiz_attempts', ['id' => $attemptid, 'userid' => $userid])) {
+            throw new \moodle_exception('accessdenied', 'admin');
+        }
 
         $transaction = $DB->start_delegated_transaction();
 
@@ -168,10 +173,6 @@ class save_data extends external_api {
         }
 
         event_handler::process_event((object)$eventdata, $context);
-
-        if ($eventdata->action === 'extensions_detected') {
-            self::save_extensions($eventdata, $context);
-        }
     }
 
     /**
@@ -183,36 +184,5 @@ class save_data extends external_api {
      */
     private static function convert_timestamp_to_seconds(int $timestamp): int {
         return (int) ($timestamp / self::TIMESTAMP_CONVERSION_FACTOR);
-    }
-
-    /**
-     * ${save_extensions}
-     *
-     * @param ${stdClass} ${$eventdata}
-     * @param ${array} ${$context}
-     *
-     */
-    private static function save_extensions(\stdClass $eventdata, array $context): void {
-        if (empty($eventdata->data)) {
-            return;
-        }
-
-        $extensions = is_string($eventdata->data) ? json_decode($eventdata->data, true) : $eventdata->data;
-
-        if (!is_array($extensions)) {
-            return;
-        }
-
-        foreach ($extensions as $ext) {
-            $record = new extension();
-            $record->set('attemptid', $context['attemptid']);
-            $record->set('userid', $context['userid']);
-            $record->set('quizid', $context['quizid']);
-            $record->set('slot', $context['slot']);
-            $record->set('session_id', $context['session_id']);
-            $record->set('extension_key', $ext['extensionKey'] ?? '');
-            $record->set('element_uid', $ext['uid'] ?? null);
-            $record->create();
-        }
     }
 }

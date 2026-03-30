@@ -114,10 +114,9 @@ class helper {
         $extensions = [];
         foreach ($records as $record) {
             $extensions[] = [
-                'key' => $record->extension_key,
-                'name' => $record->extension_name,
-                'uid' => $record->extension_uid,
-                'detected_at' => $record->timecreated
+                'extension_key'  => $record->extension_key,
+                'extension_name' => $record->extension_name,
+                'extension_uid'  => $record->extension_uid,
             ];
         }
 
