@@ -405,6 +405,12 @@ define([
                         flushEvents();
                     } else {
                         pendingEvents = [];
+                        // Clear IndexedDB so that these events are not replayed when
+                        // the next quiz question page loads in the same browser session.
+                        if (db) {
+                            const tx = db.transaction("events", "readwrite");
+                            tx.objectStore("events").clear();
+                        }
                     }
                 });
 

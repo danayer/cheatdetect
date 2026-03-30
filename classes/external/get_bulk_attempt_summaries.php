@@ -195,13 +195,17 @@ class get_bulk_attempt_summaries extends external_api {
                         ),
                         'extensions_detected' => new external_multiple_structure(
                             new external_single_structure([
-                                'extensionkey' => new external_value(
+                                'extension_key' => new external_value(
                                     PARAM_TEXT,
                                     'Extension key'
                                 ),
-                                'detectedElementUid' => new external_value(
+                                'extension_name' => new external_value(
                                     PARAM_TEXT,
-                                    'Detected element UID'
+                                    'Extension name'
+                                ),
+                                'extension_uid' => new external_value(
+                                    PARAM_TEXT,
+                                    'Extension UID'
                                 ),
                             ]),
                             'Detected extensions',

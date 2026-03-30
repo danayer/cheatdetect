@@ -62,13 +62,6 @@ class event_handler {
         $timestamp = (int)$eventdata->timestamp['unix'];
 
         self::save_raw_event($eventdata, $context, $timestamp);
-
-        $metric = self::metric($context);
-
-        $metric->set('last_event_timestamp', (int)$eventdata->timestamp['unix']);
-        $metric->set('timemodified', time());
-
-        $timestamp = (int)$eventdata->timestamp['unix'];
         self::dispatch_handler($eventdata, $context, $timestamp);
     }
 
@@ -226,35 +219,43 @@ class event_handler {
      * @return void
      */
     private static function handle_extensions_detected_event(\stdClass $event, array $ctx, int $ts): void {
-        if (empty($event->data) || !is_array($event->data)) {
+        // The data field arrives as a JSON-encoded string from the web service (PARAM_RAW).
+        // Decode it to a PHP array before processing.
+        $data = $event->data;
+        if (is_string($data)) {
+            $data = json_decode($data, true);
+        }
+
+        if (empty($data) || !is_array($data)) {
             return;
         }
 
         $metric = self::metric($ctx);
-        $metric->set('extension_count', $metric->get('extension_count') + count($event->data));
+        $metric->set('extension_count', $metric->get('extension_count') + count($data));
         $metric->save();
 
-        foreach ($event->data as $ext) {
-            if (empty($ext->uid)) {
+        foreach ($data as $ext) {
+            $uid = $ext['uid'] ?? null;
+            if (empty($uid)) {
                 continue;
             }
 
-            try {
-                extension::get_record([
-                    'attemptid' => $ctx['attemptid'],
-                    'extension_uid' => $ext->uid,
-                ]);
+            $existing = extension::get_record([
+                'attemptid'     => $ctx['attemptid'],
+                'extension_uid' => $uid,
+            ]);
+            if ($existing) {
                 continue;
-            } catch (\Exception $e) {}
+            }
 
             $rec = new extension();
             $rec->set('attemptid', $ctx['attemptid']);
             $rec->set('userid', $ctx['userid']);
             $rec->set('quizid', $ctx['quizid']);
             $rec->set('slot', isset($ctx['slot']) ? (int)$ctx['slot'] : null);
-            $rec->set('extension_uid', $ext->uid);
-            $rec->set('extension_key', $ext->extensionKey ?? 'unknown');
-            $rec->set('extension_name', $ext->name ?? 'Unknown');
+            $rec->set('extension_uid', $uid);
+            $rec->set('extension_key', $ext['extensionKey'] ?? 'unknown');
+            $rec->set('extension_name', $ext['name'] ?? 'Unknown');
             $rec->set('detection_data', json_encode($ext));
             $rec->create();
         }
@@ -270,14 +271,14 @@ class event_handler {
      * @return metric The metric persistent instance.
      */
     public static function metric(array $context): metric {
-        global $DB;
-
-        $existing = metric::get_record([
+        $lookup = [
             'attemptid' => $context['attemptid'],
             'userid'    => $context['userid'],
             'quizid'    => $context['quizid'],
             'slot'      => $context['slot']
-        ]);
+        ];
+
+        $existing = metric::get_record($lookup);
 
         if ($existing instanceof metric) {
             return $existing;
@@ -290,7 +291,18 @@ class event_handler {
         $new->set('slot', $context['slot']);
         $new->set('timecreated', time());
         $new->set('timemodified', time());
-        $new->create();
+
+        try {
+            $new->create();
+        } catch (\dml_exception $e) {
+            // A concurrent request (e.g., a sendBeacon and a periodic XHR arriving
+            // simultaneously) may have already created the record.  Re-read it.
+            $existing = metric::get_record($lookup);
+            if ($existing instanceof metric) {
+                return $existing;
+            }
+            throw $e;
+        }
 
         return $new;
     }

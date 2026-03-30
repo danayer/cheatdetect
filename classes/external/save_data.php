@@ -106,6 +106,12 @@ class save_data extends external_api {
             throw new \moodle_exception('accessdenied', 'admin');
         }
 
+        // Verify the attempt record actually belongs to this user so that a
+        // student cannot submit events for another student's valid attempt ID.
+        if (!$DB->record_exists('quiz_attempts', ['id' => $attemptid, 'userid' => $userid])) {
+            throw new \moodle_exception('accessdenied', 'admin');
+        }
+
         $transaction = $DB->start_delegated_transaction();
 
         try {
