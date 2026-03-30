@@ -179,7 +179,9 @@ class event_handler {
     /**
      * Handles a page load event.
      *
-     * Initializes the metric state as focused.
+     * Initializes the metric state as focused. Skips the update when a
+     * stale page_load arrives after later events have already been processed
+     * (e.g. when a periodic-flush AJAX races with a sendBeacon on page unload).
      *
      * @param \stdClass $event The event data.
      * @param array $ctx Context information.
@@ -188,6 +190,14 @@ class event_handler {
      */
     private static function handle_page_load_event(\stdClass $event, array $ctx, int $ts): void {
         $metric = self::metric($ctx);
+
+        // If we already have a more recent event timestamp, this page_load is
+        // arriving late (duplicate from an in-flight periodic flush). Resetting
+        // current_state here would corrupt the time-window calculation, so skip it.
+        if ($metric->get('last_event_timestamp') && $ts <= $metric->get('last_event_timestamp')) {
+            return;
+        }
+
         $metric->set('current_state', 'focused');
         $metric->set('last_event_timestamp', $ts);
         $metric->save();

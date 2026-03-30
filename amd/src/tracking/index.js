@@ -47,9 +47,15 @@ define([
             let db = null;
             let isCurrentlyFocused = !document.hidden;
 
-            // In-memory buffer mirrors what is in IndexedDB.
-            // Lets us flush synchronously on page unload via sendBeacon.
+            // In-memory buffer of all events since the last successful flush.
+            // Used as the source of truth for both periodic flushes and sendBeacon.
             let pendingEvents = [];
+
+            // Number of leading events in pendingEvents that have already been
+            // confirmed sent to the server via a successful periodic AJAX flush.
+            // Events at indices [0, flushedCount) have been sent; only events at
+            // [flushedCount, length) need to be sent on the next flush or beacon.
+            let flushedCount = 0;
 
             let extensionCheckInterval = null;
             let extensionDetectedDataAlreadySent = new Set();
@@ -393,18 +399,20 @@ define([
                         data: null
                     };
 
-                    // Add page_unload directly to the in-memory buffer so sendBeacon
-                    // includes it without needing to read IndexedDB asynchronously.
+                    // Add page_unload to the in-memory buffer.
                     pendingEvents.push(pageUnloadEvent);
 
+                    // Only send events that have not yet been confirmed sent by a
+                    // successful periodic flush (everything from flushedCount onward).
                     // sendBeacon is guaranteed to be delivered even when the page is
                     // navigating away, unlike XHR which the browser cancels.
-                    if (!sendBeaconFlush(pendingEvents)) {
+                    const unsentEvents = pendingEvents.slice(flushedCount);
+                    if (!sendBeaconFlush(unsentEvents)) {
                         // Fallback for browsers without sendBeacon support.
-                        logEvent({action: "page_unload", data: null});
                         flushEvents();
                     } else {
                         pendingEvents = [];
+                        flushedCount = 0;
                         // Clear IndexedDB so that these events are not replayed when
                         // the next quiz question page loads in the same browser session.
                         if (db) {
@@ -439,89 +447,88 @@ define([
             }
 
             /**
-             * Send all stored events to the server via REST API
-             * Clears local storage after successful transmission
+             * Send unconfirmed events to the server via REST API.
+             *
+             * Reads from the in-memory pendingEvents buffer (from flushedCount onward)
+             * rather than IndexedDB to avoid a race condition where events logged
+             * between the IndexedDB read and the AJAX response could be silently
+             * dropped by a full buffer clear.
+             *
+             * On success the confirmed events are trimmed from pendingEvents, the
+             * flushedCount pointer is reset to 0, and IndexedDB is cleared.
+             *
              * @function flushEvents
              * @returns {void}
              * @private
              */
             function flushEvents() {
-                if (db) {
-                    const transaction = db.transaction("events", "readonly");
-                    const objectStore = transaction.objectStore("events");
-                    const request = objectStore.getAll();
+                const startIndex = flushedCount;
+                const endIndex = pendingEvents.length;
 
-                    request.onsuccess = () => {
-                        const events = filterSpuriousEvents(request.result).map(event => {
-                            return {
-                                action: event.action,
-                                timestamp: {
-                                    unix: event.timestamp?.unix ?? event.timestamp
-                                },
-                                data: event.data !== undefined && event.data !== null
-                                    ? (typeof event.data === 'string'
-                                        ? event.data
-                                        : JSON.stringify(event.data))
-                                    : null
-                            };
-                        });
+                if (endIndex <= startIndex) {
+                    if (DEBUG_SHOW_CONSOLE_LOG) {
+                        // eslint-disable-next-line no-console
+                        console.log('No user actions to save');
+                    }
+                    return;
+                }
 
-                        if (events.length > 0) {
-                            Ajax.call([{
-                                methodname: 'quizaccess_cheatdetect_save_data',
-                                args: {
-                                    session_id: backendParams.sessionId,
-                                    attemptid: backendParams.attemptid,
-                                    userid: backendParams.userid,
-                                    quizid: backendParams.quizid,
-                                    slot: backendParams.slot ?? null,
-                                    events: events
-                                }
-                            }])[0].then((response) => {
-                                if (response && response.success) {
-                                    if (DEBUG_SHOW_CONSOLE_LOG) {
-                                        // eslint-disable-next-line no-console
-                                        console.log(
-                                            'User action(s) sent to server',
-                                            JSON.stringify(response, null, 2)
-                                        );
-                                    }
-                                    clearStoredEvents();
-                                } else {
-                                    // eslint-disable-next-line no-console
-                                    console.error('Server error saving events', response?.error);
-                                }
-                            }).catch((error) => {
-                                // eslint-disable-next-line no-console
-                                console.error('AJAX error saving events', error);
-                            });
-                        } else {
+                const snapshot = pendingEvents.slice(startIndex, endIndex);
+                const events = filterSpuriousEvents(snapshot).map(event => {
+                    return {
+                        action: event.action,
+                        timestamp: {
+                            unix: event.timestamp?.unix ?? event.timestamp
+                        },
+                        data: event.data !== undefined && event.data !== null
+                            ? (typeof event.data === 'string'
+                                ? event.data
+                                : JSON.stringify(event.data))
+                            : null
+                    };
+                });
+
+                if (events.length > 0) {
+                    Ajax.call([{
+                        methodname: 'quizaccess_cheatdetect_save_data',
+                        args: {
+                            session_id: backendParams.sessionId,
+                            attemptid: backendParams.attemptid,
+                            userid: backendParams.userid,
+                            quizid: backendParams.quizid,
+                            slot: backendParams.slot ?? null,
+                            events: events
+                        }
+                    }])[0].then((response) => {
+                        if (response && response.success) {
                             if (DEBUG_SHOW_CONSOLE_LOG) {
                                 // eslint-disable-next-line no-console
-                                console.log('No user actions to save');
+                                console.log(
+                                    'User action(s) sent to server',
+                                    JSON.stringify(response, null, 2)
+                                );
                             }
+                            // Remove only the events we just confirmed sending.
+                            // Events added to pendingEvents after endIndex are
+                            // preserved and will be sent on the next flush.
+                            pendingEvents.splice(0, endIndex);
+                            flushedCount = 0;
+                            // Clear IndexedDB to keep it lean (IndexedDB is written
+                            // on every logEvent for crash-recovery; events at
+                            // pendingEvents[0..] are now the only unsent events).
+                            if (db) {
+                                const tx = db.transaction("events", "readwrite");
+                                tx.objectStore("events").clear();
+                            }
+                        } else {
+                            // eslint-disable-next-line no-console
+                            console.error('Server error saving events', response?.error);
                         }
-                    };
-
-                    request.onerror = (error) => {
+                    }).catch((error) => {
                         // eslint-disable-next-line no-console
-                        console.error("Error retrieving events from IndexedDB:", error);
-                    };
+                        console.error('AJAX error saving events', error);
+                    });
                 }
-            }
-
-            /**
-             * Clear all stored events from IndexedDB
-             * Called after successful server transmission
-             * @function clearStoredEvents
-             * @returns {void}
-             * @private
-             */
-            function clearStoredEvents() {
-                pendingEvents = [];
-                const transaction = db.transaction("events", "readwrite");
-                const objectStore = transaction.objectStore("events");
-                objectStore.clear();
             }
 
             /**
