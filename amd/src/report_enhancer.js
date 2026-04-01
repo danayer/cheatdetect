@@ -741,6 +741,50 @@ function($, Ajax, Notification, Str, Popover) {
                         }
                     }
                 });
+
+                // Add gray icons to any question cells that still have no icon
+                // (slots that exist in the report table but had no tracking data collected).
+                $row.find('td[data-cblue-slot]').each(function() {
+                    var $td = $(this);
+
+                    // Skip TDs that already have an icon
+                    if ($td.find('.cheatdetect-svg-icon').length > 0) {
+                        return;
+                    }
+
+                    var slotId = $td.attr('data-cblue-slot');
+                    var $link = $td.find('a[href*="reviewquestion.php"]').first();
+
+                    if ($link.length > 0) {
+                        var $icon = createSvgIcon('gray', 'question');
+
+                        var grayPopoverData = {
+                            time_spent: 0,
+                            time_percentage: 0,
+                            copy_count: 0,
+                            focus_loss_count: 0,
+                            has_extension: false
+                        };
+                        var grayPopoverContent = generatePopoverContent(grayPopoverData, strings, slotId);
+
+                        var $iconButton = $('<button>')
+                            .attr('type', 'button')
+                            .attr('data-bs-toggle', 'popover')
+                            .attr('data-bs-trigger', 'click')
+                            .attr('data-bs-html', 'true')
+                            .attr('data-bs-title', strings.questiondetails)
+                            .attr('data-bs-content', grayPopoverContent)
+                            .attr('data-bs-placement', 'left')
+                            .addClass('btn btn-link p-0 cheatdetect-icon-button')
+                            .append($icon);
+
+                        $td.append($iconButton);
+                        if (SHOW_CONSOLE_LOG) {
+                            // eslint-disable-next-line no-console
+                            console.log('CheatDetect: Added gray icon for untracked slot ' + slotId);
+                        }
+                    }
+                });
             }
 
             // Process summary icon (outside the review link, as sibling)

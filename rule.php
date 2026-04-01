@@ -222,15 +222,25 @@ class quizaccess_cheatdetect extends quizaccess_cheat_detect_parent_class {
             $sessionId = md5(uniqid(rand(), true));
         }
 
-        // In Moodle quiz_slots, pages are numbered starting from 1, but URL uses 0-based indexing.
-        // So we need to add 1 to convert from URL page to DB page.
-        $dbpage = $page_number + 1;
+        // Get all slots for this quiz ordered by page number.
+        // We use positional lookup (the N-th slot in page order matches URL page N)
+        // rather than a direct page=N+1 match. This correctly handles quizzes whose
+        // quiz_slots.page values are not perfectly sequential (e.g. after questions
+        // were deleted or sections were re-ordered).
+        $quiz_slots = $DB->get_records(
+            'quiz_slots',
+            ['quizid' => $this->quiz->id],
+            'page ASC, slot ASC',
+            'slot, page'
+        );
+        $quiz_slots = array_values($quiz_slots);
 
-        // Get the slot number for this page.
-        $slot = $DB->get_field('quiz_slots', 'slot', ['quizid' => $this->quiz->id, 'page' => $dbpage]);
+        // URL page parameter is 0-based; the N-th page corresponds to the N-th slot
+        // in ascending page order.
+        $slot_record = isset($quiz_slots[$page_number]) ? $quiz_slots[$page_number] : null;
+        $slot = $slot_record ? (int)$slot_record->slot : null;
 
-        // This can happen if questionsperpage > 1 (multiple questions per page).
-        // In this case, we cannot reliably track which question is being worked on.
+        // No slot found for this page — cannot track reliably.
         if (!$slot) {
             return;
         }
@@ -241,7 +251,7 @@ class quizaccess_cheatdetect extends quizaccess_cheat_detect_parent_class {
             'attemptid' => $attemptid,
             'userid' => $USER->id,
             'quizid' => $this->quiz->id,
-            'slot' => $slot ?: null,
+            'slot' => $slot,
             'startDetection' => true
         ];
 

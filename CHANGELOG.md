@@ -2,6 +2,19 @@ Changelog
 All notable changes to the Quiz Access Cheat Detection plugin will be documented in this file.
 The format is based on Keep a Changelog,
 and this project adheres to Semantic Versioning.
+
+[2.1] - 2026-04-01
+Fixed
+- Report: question check icons (spy icons) now appear for ALL questions visible in the
+  quiz overview report, even when only some questions had tracking data collected.
+  Previously, questions without any tracking data were shown with no icon at all when
+  other questions in the same attempt did have data.
+- Tracking: slot lookup in `setup_attempt_page` now uses positional ordering of
+  `quiz_slots.page` values instead of a direct `page = N+1` match. This correctly
+  handles quizzes where page numbers contain gaps (e.g. after questions were deleted
+  or the quiz layout was rearranged), preventing tracking from silently being skipped
+  for affected question pages.
+
 [Unreleased]
 Added
 
